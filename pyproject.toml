@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 110
+exclude = ["migrations/versions", ".venv", "venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+# Without this, pytest doesn't add the project root to sys.path, so
+# `from app...` imports in the test files fail with
+# ModuleNotFoundError: No module named 'app' -- even when run from the
+# project root. This makes `pytest tests/ -v` work regardless of which
+# directory it's invoked from within the project.
+pythonpath = ["."]
+testpaths = ["tests"]

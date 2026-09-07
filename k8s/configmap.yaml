@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-triage-bot-config
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  P0_DEBOUNCE_MINUTES: "2"
+  SPIKE_THRESHOLD: "5"
+  SPIKE_WINDOW_MINUTES: "60"
+  NOTIFICATION_COOLDOWN_MINUTES: "15"
+  ENABLE_LLM_COMPOSER: "false"
+  CORRELATION_WINDOW_MINUTES: "15"
+  JIRA_DEFAULT_ISSUE_TYPE: "Task"
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "60"
+  # Points at an in-cluster Ollama Service if you deploy one -- Ollama is
+  # NOT included in these manifests (it needs its own Deployment, a GPU
+  # node pool is strongly recommended for acceptable latency, and a
+  # persistent volume for the model weights). The localhost default in
+  # .env.example only works for local dev, not inside this pod.
+  OLLAMA_BASE_URL: "http://ollama-service:11434"

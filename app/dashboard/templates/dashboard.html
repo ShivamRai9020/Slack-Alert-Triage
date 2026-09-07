@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Alert Triage Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root { --noise:#f0b429; --spike:#f04747; --new:#4fa3f7; --normal:#4caf50; --investigate:#b57df0; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px; background: #0f1115; color: #e6e6e6; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  h2.section-title { font-size: 16px; margin: 28px 0 12px; }
+  .subtitle { color: #9aa0a6; font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #1a1d24; border: 1px solid #2a2e37; border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #9aa0a6; margin: 0 0 10px; }
+  .stat { font-size: 28px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a2e37; vertical-align: top; }
+  th { color: #9aa0a6; font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; white-space: nowrap; }
+  .badge-noise { background: #3a2e1a; color: var(--noise); }
+  .badge-spike { background: #3a1a1a; color: var(--spike); }
+  .badge-new { background: #1a2e3a; color: var(--new); }
+  .badge-normal { background: #1a3a24; color: var(--normal); }
+  .badge-investigate { background: #2a1a3a; color: var(--investigate); }
+  .badge-open { background: #2a2e3a; color: #cfd3d8; }
+  .badge-resolved { background: #1a3a24; color: var(--normal); }
+  .priority-P0 { color: var(--spike); font-weight: 600; }
+  .priority-P1 { color: var(--noise); font-weight: 600; }
+  .priority-P2 { color: var(--new); }
+  .priority-P3 { color: #9aa0a6; }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 20px; background: #1a1d24; border: 1px solid #2a2e37; border-radius: 10px; padding: 12px 16px; }
+  .filters select, .filters input { background: #0f1115; color: #e6e6e6; border: 1px solid #2a2e37; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  .range-btns { display: flex; gap: 4px; }
+  .range-btns button { background: #0f1115; color: #9aa0a6; border: 1px solid #2a2e37; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  .range-btns button.active { background: #2a3a4a; color: #4fa3f7; border-color: #4fa3f7; }
+  .filters label { font-size: 12px; color: #9aa0a6; margin-right: 4px; }
+  .filter-group { display: flex; align-items: center; gap: 6px; }
+  .spacer { flex: 1; }
+
+  .chart-wrap { position: relative; height: 220px; }
+  .action-btn { background: #1a2e3a; color: #4fa3f7; border: 1px solid #2a3a4a; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; margin-right: 6px; }
+  .action-btn:hover { background: #24384a; }
+  .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .llm-text { color: #9aa0a6; font-style: italic; max-width: 260px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #1a1d24; border: 1px solid #2a2e37; border-radius: 8px; padding: 10px 16px; font-size: 13px; z-index: 100; max-width: 360px; }
+  .toast.error { border-color: var(--spike); color: var(--spike); }
+  .toast.success { border-color: var(--normal); color: var(--normal); }
+  a { color: #4fa3f7; }
+  details.advanced { margin-top: 28px; border: 1px solid #2a2e37; border-radius: 10px; background: #1a1d24; padding: 12px 16px; }
+  details.advanced > summary { cursor: pointer; color: #9aa0a6; font-size: 14px; font-weight: 500; list-style: none; }
+  details.advanced > summary::-webkit-details-marker { display: none; }
+  details.advanced > summary::before { content: "▸ "; color: #4fa3f7; }
+  details.advanced[open] > summary::before { content: "▾ "; }
+  details.advanced .advanced-body { margin-top: 14px; }
+  details.advanced .section-title { margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>Alert Triage</h1>
+  <div class="subtitle">P0 notifies each firing · other priorities after 5+ in 60m · channels show Slack names</div>
+
+  <div class="filters">
+    <div class="filter-group range-btns" id="rangeButtons">
+      {% for r in time_ranges %}<button data-range="{{ r }}">{{ r }}</button>{% endfor %}
+    </div>
+    <div class="filter-group">
+      <label>Techteam</label>
+      <select id="verticalFilter"><option value="">All</option>{% for v in verticals %}<option value="{{ v }}">{{ v }}</option>{% endfor %}</select>
+    </div>
+    <div class="filter-group">
+      <label>Priority</label>
+      <select id="severityFilter">
+        <option value="">All</option>
+        <option value="CRITICAL">P0</option>
+        <option value="WARNING">P1</option>
+        <option value="INFO">P2</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Status</label>
+      <select id="statusFilter">
+        <option value="">All</option>
+        <option value="open">Open</option>
+        <option value="resolved">Resolved</option>
+      </select>
+    </div>
+    <div class="spacer"></div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><h2>Ingested</h2><div class="stat" id="cardIngested">–</div></div>
+    <div class="card"><h2>Notified</h2><div class="stat" id="cardNotified">–</div></div>
+    <div class="card"><h2>Jira</h2><div class="stat" id="cardJira">–</div></div>
+    <div class="card"><h2>Suppressed</h2><div class="stat" id="cardSuppressed">–</div></div>
+  </div>
+
+  <div class="grid" style="margin-top:8px;">
+    <div class="card">
+      <h2>Volume by techteam</h2>
+      <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Priority mix</h2>
+      <div class="chart-wrap"><canvas id="priorityChart"></canvas></div>
+    </div>
+  </div>
+
+  <h2 class="section-title">Alerts</h2>
+  <div class="card">
+    <table>
+      <tr>
+        <th>Alert</th><th>Channel</th><th>Techteam</th><th>Priority</th><th>Status</th>
+        <th>Jira</th><th></th>
+      </tr>
+      <tbody id="incidentFeedBody">
+        <tr><td colspan="7" style="color:#9aa0a6;">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 class="section-title">Top recurring <span class="subtitle">({{ window_days }}d)</span></h2>
+  <div class="card">
+    <table>
+      <tr><th>Alert</th><th>Channel</th><th>Service</th><th>Techteam</th><th>Priority</th><th>Occurrences</th><th>Classification</th></tr>
+      {% for a in top_recurring %}
+      <tr>
+        <td>{{ a.alert_name or "—" }}</td>
+        <td title="{{ a.channel_id or '' }}">{% if a.channel_name and not a.channel_name.startswith('C') %}#{{ a.channel_name }}{% else %}{{ a.channel_name }}{% endif %}</td>
+        <td>{{ a.service or "—" }}</td>
+        <td>{{ a.vertical or "—" }}</td>
+        <td class="priority-{{ a.priority }}">{{ a.priority or "—" }}</td>
+        <td>{{ a.occurrence_count }}</td>
+        <td><span class="badge badge-{{ a.classification_css }}">{{ a.classification }}</span></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <details class="advanced" id="advancedConfig">
+    <summary>Advanced (optional)</summary>
+    <div class="advanced-body">
+  <h2 class="section-title">Routing Config <span class="subtitle">(add or override which channel a vertical/service/alert routes to)</span></h2>
+  <div class="card">
+    <form id="routingForm" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Vertical *</label>
+        <input type="text" id="rcVertical" placeholder="payments" required>
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Service (optional)</label>
+        <input type="text" id="rcService" placeholder="checkout-api">
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Alert name (optional, most specific)</label>
+        <input type="text" id="rcAlertName" placeholder="Database connection failures">
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Alert channel ID *</label>
+        <input type="text" id="rcAlertChannel" placeholder="C0BP4HDTVFW" required>
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Dev channel ID</label>
+        <input type="text" id="rcDevChannel" placeholder="C0...">
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>DevOps channel ID</label>
+        <input type="text" id="rcDevopsChannel" placeholder="C0...">
+      </div>
+      <button type="submit" class="action-btn" style="padding:8px 14px;">Save routing rule</button>
+    </form>
+    <div class="subtitle" style="margin-top:10px;">
+      This decides WHERE notifications go once an alert's vertical/service is already known. It does not identify which vertical a channel belongs to -- see "Channel → Vertical Mapping" below for that. Resolution precedence: alert-name override &gt; service default &gt; vertical default.
+    </div>
+  </div>
+
+  <h2 class="section-title">Channel → Vertical Mapping <span class="subtitle">(which vertical/service does THIS channel's alerts belong to -- many channels can map to one vertical)</span></h2>
+  <div class="card">
+    <form id="channelForm" style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Channel ID *</label>
+        <input type="text" id="chChannelId" placeholder="C0BP4HDTVFW" required>
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Channel display name</label>
+        <input type="text" id="chChannelName" placeholder="pg-aws">
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Vertical *</label>
+        <input type="text" id="chVertical" placeholder="pg2.0" required>
+      </div>
+      <div class="filter-group" style="flex-direction:column; align-items:flex-start;">
+        <label>Service (optional -- leave blank if this channel covers the whole vertical)</label>
+        <input type="text" id="chService" placeholder="postprocessing_pg2">
+      </div>
+      <button type="submit" class="action-btn" style="padding:8px 14px;">Save channel mapping</button>
+    </form>
+    <div class="subtitle" style="margin-top:10px;">
+      This is what actually identifies which vertical an incoming alert belongs to -- checked BEFORE the alert text itself and overriding it when both are present. Saving the same Channel ID again updates the existing mapping rather than creating a duplicate.
+    </div>
+    <table style="margin-top:14px;">
+      <tr><th>Channel</th><th>Vertical</th><th>Service</th></tr>
+      <tbody id="channelMappingBody">
+        <tr><td colspan="3" style="color:#9aa0a6;">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+    </div>
+  </details>
+
+  <div id="toast" class="toast" style="display:none;"></div>
+
+<script>
+const state = { range: '7d', vertical: '', severity: '', status: '' };
+let trendChart, priorityChart;
+const VERTICAL_COLORS = ['#4fa3f7', '#f0b429', '#f04747', '#4caf50', '#b57df0', '#3fd0c9', '#e88ad6', '#c9c04f'];
+const CLASSIFICATION_CSS = {
+  potential_noise: 'noise', high_frequency_spike: 'spike', new_unknown: 'new',
+  recurring_normal: 'normal', requires_investigation: 'investigate'
+};
+
+function colorFor(index) { return VERTICAL_COLORS[index % VERTICAL_COLORS.length]; }
+// No visible input for this -- most setups (including local testing)
+// run with INTERNAL_API_KEY unset, where no key is needed at all. If
+// you DO set one on the server, pass it via a URL param instead of
+// adding UI clutter back: reload this page as
+// /dashboard?api_key=your-key-here and actions will pick it up.
+function apiKey() { return new URLSearchParams(window.location.search).get('api_key') || ''; }
+// Only include the header at all if a key was actually entered -- an
+// empty X-API-Key header is pointless to send, and this way the request
+// always goes through when the server has no key configured (auth is a
+// no-op), with the server's own 401 (if it DOES require one) being the
+// single source of truth for whether a key is actually needed, instead
+// of the UI guessing and blocking prematurely.
+function authHeaders() { const k = apiKey(); return k ? { 'X-API-Key': k } : {}; }
+function qs(params) { return Object.entries(params).filter(([,v]) => v).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&'); }
+
+function showToast(message, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.className = 'toast ' + (isError ? 'error' : 'success');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+async function fetchJSON(url, options) {
+  const resp = await fetch(url, options);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+async function refreshSummary() {
+  const data = await fetchJSON(`/dashboard/api/summary?${qs({range: state.range, vertical: state.vertical, severity: state.severity})}`);
+  document.getElementById('cardIngested').textContent = data.total_ingested;
+  document.getElementById('cardNotified').textContent = data.notified ?? 0;
+  document.getElementById('cardJira').textContent = data.jira_tickets_created;
+  document.getElementById('cardSuppressed').textContent = data.suppressed_total;
+  document.getElementById('cardSuppressed').title =
+    `${data.cooldown_suppressed} not notified (priority/cooldown) + ${data.deduplicated} Slack deduped since restart`;
+}
+
+async function refreshTrend() {
+  const data = await fetchJSON(`/dashboard/api/trend?${qs({range: state.range, vertical: state.vertical})}`);
+  const allBuckets = new Set();
+  Object.values(data.series).forEach(points => points.forEach(p => allBuckets.add(p.bucket)));
+  const labels = Array.from(allBuckets).sort();
+
+  const datasets = Object.entries(data.series).map(([vertical, points], i) => {
+    const byBucket = Object.fromEntries(points.map(p => [p.bucket, p.count]));
+    return {
+      label: vertical,
+      data: labels.map(b => byBucket[b] || 0),
+      borderColor: colorFor(i),
+      backgroundColor: colorFor(i),
+      tension: 0.25,
+      fill: false,
+    };
+  });
+
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#e6e6e6' } } },
+      scales: {
+        x: { ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e37' } },
+        y: { ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e37' }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+async function refreshPriority() {
+  const data = await fetchJSON(`/dashboard/api/priority-distribution?${qs({range: state.range, vertical: state.vertical})}`);
+  const verticals = Object.keys(data.distribution);
+  const priorities = ['P0', 'P1', 'P2', 'P3'];
+  const priorityColors = { P0: '#f04747', P1: '#f0b429', P2: '#4fa3f7', P3: '#5a6472' };
+
+  const datasets = priorities.map(p => ({
+    label: p,
+    data: verticals.map(v => data.distribution[v][p] || 0),
+    backgroundColor: priorityColors[p],
+  }));
+
+  if (priorityChart) priorityChart.destroy();
+  priorityChart = new Chart(document.getElementById('priorityChart'), {
+    type: 'bar',
+    data: { labels: verticals, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#e6e6e6' } } },
+      scales: {
+        x: { stacked: true, ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e37' } },
+        y: { stacked: true, ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e37' }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+
+function formatChannel(name, id) {
+  if (!name) return '—';
+  if (name.startsWith('C') && name === id) return name;
+  return name.startsWith('#') ? name : `#${name}`;
+}
+
+async function refreshIncidents() {
+  const data = await fetchJSON(`/dashboard/api/incidents?${qs({range: state.range, vertical: state.vertical, severity: state.severity, status: state.status})}`);
+  const body = document.getElementById('incidentFeedBody');
+  if (!data.incidents.length) {
+    body.innerHTML = '<tr><td colspan="7" style="color:#9aa0a6;">No alerts in this window</td></tr>';
+    return;
+  }
+  body.innerHTML = data.incidents.map(inc => {
+    const cls = CLASSIFICATION_CSS[inc.classification] || 'normal';
+    const jiraCell = inc.jira_url ? `<a href="${inc.jira_url}" target="_blank">${inc.jira_issue_key}</a>` : (inc.jira_issue_key || '—');
+    return `<tr>
+      <td>${inc.alert_name || '—'}<br><span class="badge badge-${cls}">${inc.classification || '—'}</span></td>
+      <td title="${inc.channel_id || ''}">${formatChannel(inc.channel_name, inc.channel_id)}</td>
+      <td>${inc.vertical || '—'}</td>
+      <td class="priority-${inc.priority}">${inc.priority}</td>
+      <td><span class="badge badge-${inc.status}">${inc.status}</span></td>
+      <td>${jiraCell}</td>
+      <td>
+        <button class="action-btn" onclick="doReevaluate(${inc.fingerprint_id}, this)">Re-run</button>
+        <button class="action-btn" onclick="doSyncJira(${inc.incident_id}, this)">Sync</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function doReevaluate(fingerprintId, btn) {
+  btn.disabled = true;
+  try {
+    const result = await fetchJSON(`/dashboard/actions/${fingerprintId}/reevaluate`, {
+      method: 'POST', headers: authHeaders(),
+    });
+    showToast(`Re-evaluated: ${result.previous_classification} → ${result.new_classification}${result.notified ? ' (notified)' : ' (no notification -- cooldown or same result)'}`, false);
+    refreshIncidents(); refreshSummary();
+  } catch (e) {
+    showToast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doSyncJira(incidentId, btn) {
+  btn.disabled = true;
+  try {
+    const result = await fetchJSON(`/dashboard/actions/${incidentId}/sync-jira`, {
+      method: 'POST', headers: authHeaders(),
+    });
+    if (result.error) { showToast(result.error, true); }
+    else { showToast(result.changed ? `Synced -- status now "${result.local_status}"` : 'Already in sync', false); refreshIncidents(); }
+  } catch (e) {
+    showToast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function refreshAll() {
+  refreshSummary();
+  refreshTrend();
+  refreshPriority();
+  refreshIncidents();
+}
+
+document.getElementById('rangeButtons').addEventListener('click', (e) => {
+  if (e.target.tagName !== 'BUTTON') return;
+  state.range = e.target.dataset.range;
+  document.querySelectorAll('#rangeButtons button').forEach(b => b.classList.toggle('active', b === e.target));
+  refreshAll();
+});
+document.getElementById('verticalFilter').addEventListener('change', (e) => { state.vertical = e.target.value; refreshAll(); });
+document.getElementById('severityFilter').addEventListener('change', (e) => { state.severity = e.target.value; refreshAll(); });
+document.getElementById('statusFilter').addEventListener('change', (e) => { state.status = e.target.value; refreshIncidents(); });
+
+document.getElementById('routingForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const payload = {
+    vertical: document.getElementById('rcVertical').value.trim(),
+    service: document.getElementById('rcService').value.trim() || null,
+    alert_name: document.getElementById('rcAlertName').value.trim() || null,
+    alert_channel: document.getElementById('rcAlertChannel').value.trim(),
+    dev_notify_channel: document.getElementById('rcDevChannel').value.trim() || null,
+    devops_notify_channel: document.getElementById('rcDevopsChannel').value.trim() || null,
+  };
+  if (!payload.vertical || !payload.alert_channel) {
+    showToast('Vertical and Alert channel ID are required.', true);
+    return;
+  }
+
+  try {
+    const result = await fetchJSON('/config/verticals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(payload),
+    });
+    showToast(`Routing rule saved (id=${result.id}). Existing rows aren't overwritten -- if this duplicates an existing (vertical, service, alert_name) combination, check /config/verticals for stale entries.`, false);
+    document.getElementById('routingForm').reset();
+    refreshSummary();
+  } catch (err) {
+    showToast(err.message, true);
+  }
+});
+
+async function refreshChannelMappings() {
+  const body = document.getElementById('channelMappingBody');
+  try {
+    const data = await fetchJSON('/config/channels', { headers: authHeaders() });
+    if (!data.length) {
+      body.innerHTML = '<tr><td colspan="3" style="color:#9aa0a6;">No channel mappings yet</td></tr>';
+      return;
+    }
+    body.innerHTML = data.map(c => `<tr>
+      <td title="${c.channel_id}">${c.channel_name ? (c.channel_name.startsWith('#') ? c.channel_name : '#' + c.channel_name) : c.channel_id}</td>
+      <td>${c.vertical}</td>
+      <td>${c.service || '—'}</td>
+    </tr>`).join('');
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="3" style="color:#f04747;">${err.message}</td></tr>`;
+  }
+}
+
+document.getElementById('channelForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const payload = {
+    channel_id: document.getElementById('chChannelId').value.trim(),
+    channel_name: document.getElementById('chChannelName').value.trim() || null,
+    vertical: document.getElementById('chVertical').value.trim(),
+    service: document.getElementById('chService').value.trim() || null,
+  };
+  if (!payload.channel_id || !payload.vertical) {
+    showToast('Channel ID and Vertical are required.', true);
+    return;
+  }
+
+  try {
+    const result = await fetchJSON('/config/channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(payload),
+    });
+    showToast(result.updated ? 'Channel mapping updated.' : 'Channel mapping created.', false);
+    document.getElementById('channelForm').reset();
+    refreshChannelMappings();
+  } catch (err) {
+    showToast(err.message, true);
+  }
+});
+
+document.querySelector('#rangeButtons button[data-range="7d"]')?.classList.add('active');
+refreshAll();
+
+const advanced = document.getElementById('advancedConfig');
+if (advanced) {
+  advanced.addEventListener('toggle', () => {
+    if (advanced.open) refreshChannelMappings();
+  });
+}
+</script>
+</body>
+</html>

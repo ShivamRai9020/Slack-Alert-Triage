@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-triage-bot
+  labels:
+    app: alert-triage-bot
+spec:
+  # Single replica by default: the Slack duplicate-delivery guard
+  # (app/ingestion/dedup_guard.py) is in-memory / process-local. Before
+  # scaling beyond 1 replica, move that guard to Redis SETNX-with-expiry
+  # (noted in the README) or duplicate Slack events across replicas will
+  # each be processed as separate occurrences.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-triage-bot
+  template:
+    metadata:
+      labels:
+        app: alert-triage-bot
+    spec:
+      containers:
+        - name: alert-triage-bot
+          image: alert-triage-bot:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: alert-triage-bot-config
+            - secretRef:
+                name: alert-triage-bot-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-triage-bot
+spec:
+  selector:
+    app: alert-triage-bot
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
