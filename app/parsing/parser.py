@@ -1,7 +1,20 @@
 from datetime import datetime, timezone
+from html import unescape
 
 from app.parsing.profiles import profile_for_message
 from app.parsing.schemas import ParsedAlert
+
+
+def _first_capture(match) -> str | None:
+    """Prefer named group, else first non-empty numbered group."""
+    if match.lastgroup:
+        value = match.group(match.lastgroup)
+        if value:
+            return value
+    for value in match.groups():
+        if value:
+            return value
+    return None
 
 
 def parse_alert_message(
@@ -18,12 +31,20 @@ def parse_alert_message(
     `raw_message` populated is still stored and can be triaged
     (conservatively, as "unknown") rather than dropped.
     """
-    patterns = profile_for_message(channel, raw_message)
+    # Slack often HTML-escapes > as &gt; inside link labels.
+    normalized = unescape(raw_message or "")
+    patterns = profile_for_message(channel, normalized)
     extracted: dict[str, str | None] = {}
 
     for field, pattern in patterns.items():
-        match = pattern.search(raw_message)
-        extracted[field] = match.group(1).strip() if match else None
+        match = pattern.search(normalized)
+        if not match:
+            extracted[field] = None
+            continue
+        value = _first_capture(match)
+        if value:
+            value = value.strip().strip("*`").strip()
+        extracted[field] = value or None
 
     severity = extracted.get("severity")
     if severity:
