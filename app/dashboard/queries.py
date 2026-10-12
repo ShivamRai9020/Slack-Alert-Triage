@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.slack.channel_names import display_channel_name
-from app.db.models import AlertEvent, AlertFingerprint, Incident, RecommendationLog
+from app.db.models import AlertDailyRollup, AlertEvent, AlertFingerprint, Incident, RecommendationLog
 
 # Derived mapping, used ONLY as a fallback for alerts that don't carry
 # an explicit priority from the source system (AlertEvent.priority is
@@ -58,6 +58,33 @@ def _bucket_expr(session: Session, granularity: str):
 
 def _format_bucket(value) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+# ---------------------------------------------------------------------
+# Retention rollups. Raw alert_events older than
+# settings.alert_event_retention_days are folded into alert_daily_rollups
+# and deleted (app/retention/prune.py); events still referenced by
+# recommendations_log/incidents are kept and never rolled up. So
+# "live events + rollups" counts every alert exactly once, and the daily
+# trend queries below add rollup counts for any window that reaches past
+# the retention cutoff. Rollups are day-granular: a window starting
+# mid-day includes that whole rolled-up day (same as a day-bucket chart).
+# ---------------------------------------------------------------------
+
+def _rollup_day_key(session: Session, day) -> str:
+    """Format a rollup date exactly like _bucket_expr(..., "day") output
+    is formatted for the active dialect, so both sources merge into the
+    same bucket key."""
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name == "sqlite":
+        return day.isoformat()
+    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).isoformat()
+
+
+def _since_date(since: datetime):
+    if since.tzinfo is not None:
+        since = since.astimezone(timezone.utc)
+    return since.date()
 
 
 def distinct_verticals(session: Session) -> list[str]:
@@ -158,7 +185,21 @@ def daily_frequency_trend(session: Session, days: int = 7) -> list[dict]:
         .order_by(day_bucket)
     ).all()
 
-    return [{"day": _format_bucket(r[0]), "count": r[1]} for r in rows]
+    totals: dict[str, int] = {}
+    for bucket, count in rows:
+        key = _format_bucket(bucket)
+        totals[key] = totals.get(key, 0) + count
+
+    rollups = session.execute(
+        select(AlertDailyRollup.day, func.sum(AlertDailyRollup.count))
+        .where(AlertDailyRollup.day >= _since_date(since))
+        .group_by(AlertDailyRollup.day)
+    ).all()
+    for day, count in rollups:
+        key = _rollup_day_key(session, day)
+        totals[key] = totals.get(key, 0) + int(count or 0)
+
+    return [{"day": k, "count": totals[k]} for k in sorted(totals)]
 
 
 def notification_channel_split(session: Session, since: datetime) -> list[tuple[str, int]]:
@@ -200,10 +241,28 @@ def alert_volume_by_vertical_over_time(
         .order_by(AlertEvent.vertical, bucket_expr)
     ).all()
 
-    series: dict[str, list[dict]] = {}
+    per_vertical: dict[str, dict[str, int]] = {}
     for vertical, bucket, count in rows:
-        series.setdefault(vertical, []).append({"bucket": _format_bucket(bucket), "count": count})
-    return series
+        buckets = per_vertical.setdefault(vertical, {})
+        key = _format_bucket(bucket)
+        buckets[key] = buckets.get(key, 0) + count
+
+    # Rollups are daily only; hourly views (24h range) stay live-only.
+    if granularity == "day":
+        rollups = session.execute(
+            select(AlertDailyRollup.vertical, AlertDailyRollup.day, func.sum(AlertDailyRollup.count))
+            .where(AlertDailyRollup.day >= _since_date(since), AlertDailyRollup.vertical != "")
+            .group_by(AlertDailyRollup.vertical, AlertDailyRollup.day)
+        ).all()
+        for vertical, day, count in rollups:
+            buckets = per_vertical.setdefault(vertical, {})
+            key = _rollup_day_key(session, day)
+            buckets[key] = buckets.get(key, 0) + int(count or 0)
+
+    return {
+        vertical: [{"bucket": k, "count": buckets[k]} for k in sorted(buckets)]
+        for vertical, buckets in sorted(per_vertical.items())
+    }
 
 
 def priority_distribution_by_vertical(session: Session, since: datetime) -> dict[str, dict[str, int]]:
@@ -222,7 +281,19 @@ def priority_distribution_by_vertical(session: Session, since: datetime) -> dict
     result: dict[str, dict[str, int]] = {}
     for vertical, severity, priority, count in rows:
         bucket = result.setdefault(vertical, {"P0": 0, "P1": 0, "P2": 0, "P3": 0})
-        bucket[effective_priority(priority, severity)] += count
+        p = effective_priority(priority, severity)
+        bucket[p] = bucket.get(p, 0) + count
+
+    # Rollup priority is already the effective priority.
+    rollups = session.execute(
+        select(AlertDailyRollup.vertical, AlertDailyRollup.priority, func.sum(AlertDailyRollup.count))
+        .where(AlertDailyRollup.day >= _since_date(since), AlertDailyRollup.vertical != "")
+        .group_by(AlertDailyRollup.vertical, AlertDailyRollup.priority)
+    ).all()
+    for vertical, priority, count in rollups:
+        bucket = result.setdefault(vertical, {"P0": 0, "P1": 0, "P2": 0, "P3": 0})
+        p = priority or DEFAULT_PRIORITY
+        bucket[p] = bucket.get(p, 0) + int(count or 0)
     return result
 
 

@@ -49,6 +49,12 @@ def on_startup():
     finally:
         seed_session.close()
 
+    # Background data retention (rollup + prune old alert_events); no-op
+    # when ALERT_EVENT_RETENTION_DAYS=0. See app/retention/.
+    from app.retention import scheduler as retention_scheduler
+
+    retention_scheduler.start()
+
     if settings.slack_bot_token and settings.slack_app_token:
         from app.ingestion.slack_listener import start_socket_mode
 
@@ -62,6 +68,13 @@ def on_startup():
             "SLACK_BOT_TOKEN / SLACK_APP_TOKEN not set — Slack listener not started. "
             "Use POST /internal/events or the mock generator to feed alerts."
         )
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    from app.retention import scheduler as retention_scheduler
+
+    retention_scheduler.stop()
 
 
 @app.get("/health")

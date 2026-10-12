@@ -55,5 +55,12 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_requests_per_minute: int = 60
 
+    # Data retention -- alert_events older than this many days are rolled
+    # up into alert_daily_rollups (per day/vertical/channel/priority/
+    # severity counts) and then deleted. 0 disables retention entirely.
+    alert_event_retention_days: int = 30
+    # How often the in-process background job runs retention.
+    retention_run_interval_hours: int = 24
+
 
 settings = Settings()

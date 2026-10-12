@@ -2,11 +2,12 @@
 ORM models. Kept intentionally close to the proposed SQL schema so the
 mapping between "what we designed" and "what's running" stays obvious.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -188,3 +189,37 @@ class RecommendationLog(Base):
     # the Slack message and then discarded; it was never persisted
     # anywhere, so there was nothing in the DB for a dashboard to show.
     llm_explanation: Mapped[str | None] = mapped_column(Text)
+
+
+class AlertDailyRollup(Base):
+    """
+    Per-day aggregate of alert_events written by the retention job
+    (app/retention/prune.py) just before old events are deleted, so
+    dashboard trend charts keep working for days whose raw events are
+    gone. Dimension columns are NOT NULL with "" standing in for "unknown"
+    -- a NULL would make the unique constraint useless (NULL != NULL in
+    SQL), letting duplicate rows for the same bucket accumulate. Read
+    paths convert "" back to None.
+
+    priority is the EFFECTIVE priority (explicit alert priority, else the
+    severity-derived fallback) at rollup time, matching what the
+    dashboard shows for live events.
+    """
+    __tablename__ = "alert_daily_rollups"
+    __table_args__ = (
+        UniqueConstraint(
+            "day", "vertical", "source_channel", "priority", "severity",
+            name="uq_alert_daily_rollup_bucket",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    day: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    vertical: Mapped[str] = mapped_column(String, nullable=False, default="")
+    source_channel: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # Display label only (latest non-empty name seen); not part of the key.
+    source_channel_name: Mapped[str | None] = mapped_column(String)
+    priority: Mapped[str] = mapped_column(String, nullable=False, default="")
+    severity: Mapped[str] = mapped_column(String, nullable=False, default="")
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
